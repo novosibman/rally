@@ -119,8 +119,10 @@ def percentiles_for_sample_size(sample_size):
         return [50, 90, 99, 100]
     elif 1000 <= sample_size < 10000:
         return [50, 90, 99, 99.9, 100]
-    else:
+    elif 10000 <= sample_size < 100000:
         return [50, 90, 99, 99.9, 99.99, 100]
+    else:
+        return [50, 90, 99, 99.9, 99.99, 99.999, 100]
 
 
 class StatsCalculator:
