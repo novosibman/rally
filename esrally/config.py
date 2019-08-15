@@ -72,7 +72,9 @@ class ConfigFile:
 
     @property
     def config_dir(self):
-        return "%s/.rally" % os.path.expanduser("~")
+        # RS: use pwd
+        return os.getcwd()
+        #return "%s/.rally" % os.path.expanduser("~")
 
     @property
     def location(self):

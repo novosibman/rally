@@ -39,14 +39,18 @@ def log_config_path():
     """
     :return: The absolute path to Rally's log configuration file.
     """
-    return os.path.join(os.path.expanduser("~"), ".rally", "logging.json")
+    # RS: use pwd
+    return os.path.join(default_log_path(), "logging.json")
+    #return os.path.join(os.path.expanduser("~"), ".rally", "logging.json")
 
 
 def default_log_path():
     """
     :return: The absolute path to the directory that contains Rally's log file.
     """
-    return os.path.join(os.path.expanduser("~"), ".rally", "logs")
+    # RS: use pwd
+    return "%s/logs" % os.getcwd()
+    #return os.path.join(os.path.expanduser("~"), ".rally", "logs")
 
 
 def remove_obsolete_default_log_config():
