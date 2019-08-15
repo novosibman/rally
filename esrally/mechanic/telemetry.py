@@ -1143,8 +1143,15 @@ class JvmStatsSummary(InternalTelemetryDevice):
         for node in nodes.values():
             node_name = node["name"]
             gc = node["jvm"]["gc"]["collectors"]
-            old_gen_collection_time = gc["old"]["collection_time_in_millis"]
-            young_gen_collection_time = gc["young"]["collection_time_in_millis"]
+            if gc.get("old", None) is not None:
+                old_gen_collection_time = gc["old"]["collection_time_in_millis"]
+                young_gen_collection_time = gc["young"]["collection_time_in_millis"]
+            elif gc.get("GPGC Old", None) is not None:
+                old_gen_collection_time = gc["GPGC Old"]["collection_time_in_millis"]
+                young_gen_collection_time = gc["GPGC New"]["collection_time_in_millis"]
+            else:
+                print("Unknown GC info format:")
+                print(gc)
             jvm_stats[node_name] = {
                 "young_gc": young_gen_collection_time,
                 "old_gc": old_gen_collection_time,
