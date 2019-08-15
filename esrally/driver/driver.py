@@ -764,12 +764,26 @@ class Sampler:
         self.start_timestamp = start_timestamp
         self.q = queue.Queue(maxsize=16384)
         self.logger = logging.getLogger(__name__)
+        self.added = 0
+        self.addMax = 50000
+        self.samples_file = open("samples_%f_%s_%s.txt" % (time.time(), task.operation.name, client_id), "w")
 
     def add(self, sample_type, request_meta_data, latency_ms, service_time_ms, total_ops, total_ops_unit, time_period, percent_completed):
         try:
-            self.q.put_nowait(Sample(self.client_id, time.time(), time.perf_counter() - self.start_timestamp, self.task,
+            sample = Sample(self.client_id, time.time(), time.perf_counter() - self.start_timestamp, self.task,
                                      sample_type, request_meta_data, latency_ms, service_time_ms, total_ops, total_ops_unit, time_period,
-                                     percent_completed))
+                                     percent_completed)
+            if self.added < self.addMax:
+                self.q.put_nowait(sample)
+            if self.added == self.addMax:
+                self.logger.info("Sampler stopped adding results to the memory queue at %d number", self.added)
+            self.added = self.added + 1
+            if sample_type == metrics.SampleType.Warmup:
+                mtype = "W"
+            else:
+                mtype = "M"
+            self.samples_file.write("%f,%f,[%d %s],%f,%s,%s,%f\n" % (sample.absolute_time, percent_completed, total_ops, total_ops_unit, service_time_ms, request_meta_data["success"], mtype, latency_ms))
+
         except queue.Full:
             self.logger.warning("Dropping sample for [%s] due to a full sampling queue.", self.task.operation.name)
 
