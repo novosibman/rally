@@ -766,7 +766,7 @@ class Sampler:
         self.logger = logging.getLogger(__name__)
         self.added = 0
         self.addMax = 50000
-        self.samples_file = open("samples_%f_%s_%s.txt" % (time.time(), task.operation.name, client_id), "w")
+        self.samples_file = open("samples_%f_%s_%s.txt" % (time.time(), task.name, client_id), "w")
 
     def add(self, sample_type, request_meta_data, latency_ms, service_time_ms, total_ops, total_ops_unit, time_period, percent_completed):
         try:
