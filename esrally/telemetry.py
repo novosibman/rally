@@ -16,18 +16,16 @@
 # under the License.
 
 import collections
+import json
 import logging
 import os
-import re
-import signal
-import subprocess
-import tabulate
 import threading
-import json
+
+import tabulate
 
 from esrally import metrics, time, exceptions
-from esrally.utils import io, sysstats, console, versions, opts
 from esrally.metrics import MetaInfoScope
+from esrally.utils import io, sysstats, console, opts
 
 
 def list_telemetry():
@@ -56,11 +54,6 @@ class Telemetry:
                 opts.extend(additional_opts)
         return opts
 
-    def attach_to_cluster(self, cluster):
-        for device in self.devices:
-            if self._enabled(device):
-                device.attach_to_cluster(cluster)
-
     def on_pre_node_start(self, node_name):
         for device in self.devices:
             if self._enabled(device):
@@ -86,11 +79,6 @@ class Telemetry:
             if self._enabled(device):
                 device.on_benchmark_stop()
 
-    def detach_from_cluster(self, cluster):
-        for device in self.devices:
-            if self._enabled(device):
-                device.detach_from_cluster(cluster)
-
     def _enabled(self, device):
         return device.internal or device.command in self.enabled_devices
 
@@ -108,9 +96,6 @@ class TelemetryDevice:
     def instrument_java_opts(self, car, candidate_id):
         return {}
 
-    def attach_to_cluster(self, cluster):
-        pass
-
     def on_pre_node_start(self, node_name):
         pass
 
@@ -118,9 +103,6 @@ class TelemetryDevice:
         pass
 
     def detach_from_node(self, node, running):
-        pass
-
-    def detach_from_cluster(self, cluster):
         pass
 
     def on_benchmark_start(self):
@@ -304,10 +286,6 @@ class CcrStats(TelemetryDevice):
 
         self.metrics_store = metrics_store
         self.samplers = []
-
-    def attach_to_cluster(self, cluster):
-        # This cluster parameter does not correspond to the cluster names passed in target.hosts, see on_benchmark_start()
-        super().attach_to_cluster(cluster)
 
     def on_benchmark_start(self):
         recorder = []
@@ -712,65 +690,6 @@ class StartupTime(InternalTelemetryDevice):
         self.metrics_store.put_value_node_level(node.node_name, "node_startup_time", self.timer.total_time(), "s")
 
 
-class MergeParts(InternalTelemetryDevice):
-    """
-    Gathers merge parts time statistics. Note that you need to run a track setup which logs these data.
-    """
-    MERGE_TIME_LINE = re.compile(r": (\d+) msec to merge ([a-z ]+) \[(\d+) docs\]")
-
-    def __init__(self, metrics_store, node_log_dir):
-        super().__init__()
-        self.node_log_dir = node_log_dir
-        self.metrics_store = metrics_store
-        self._t = None
-        self.node = None
-
-    def attach_to_node(self, node):
-        self.node = node
-
-    def on_benchmark_stop(self):
-        self.logger.info("Analyzing merge times.")
-        # first decompress all logs. They have unique names so it's safe to do that. It's easier to first decompress everything
-        for log_file in os.listdir(self.node_log_dir):
-            log_path = "%s/%s" % (self.node_log_dir, log_file)
-            if io.is_archive(log_path):
-                self.logger.info("Decompressing [%s] to analyze merge times...", log_path)
-                io.decompress(log_path, self.node_log_dir)
-
-        # we need to add up times from all files
-        merge_times = {}
-        for log_file in os.listdir(self.node_log_dir):
-            log_path = "%s/%s" % (self.node_log_dir, log_file)
-            if io.is_archive(log_file):
-                self.logger.debug("Skipping archived logs in [%s].", log_path)
-            elif io.has_extension(log_file, ".json"):
-                self.logger.debug("Skipping JSON-formatted logs in [%s].", log_path)
-            else:
-                self.logger.debug("Analyzing merge times in [%s]", log_path)
-                with open(log_path, mode="rt", encoding="utf-8") as f:
-                    self._extract_merge_times(f, merge_times)
-        if merge_times:
-            self._store_merge_times(merge_times)
-        self.logger.info("Finished analyzing merge times. Extracted [%s] different merge time components.", len(merge_times))
-
-    def _extract_merge_times(self, file, merge_times):
-        for line in file.readlines():
-            match = MergeParts.MERGE_TIME_LINE.search(line)
-            if match is not None:
-                duration_ms, part, num_docs = match.groups()
-                if part not in merge_times:
-                    merge_times[part] = [0, 0]
-                l = merge_times[part]
-                l[0] += int(duration_ms)
-                l[1] += int(num_docs)
-
-    def _store_merge_times(self, merge_times):
-        for k, v in merge_times.items():
-            metric_suffix = k.replace(" ", "_")
-            self.metrics_store.put_value_node_level(self.node.node_name, "merge_parts_total_time_%s" % metric_suffix, v[0], "ms")
-            self.metrics_store.put_count_node_level(self.node.node_name, "merge_parts_total_docs_%s" % metric_suffix, v[1])
-
-
 class DiskIo(InternalTelemetryDevice):
     """
     Gathers disk I/O stats.
@@ -789,31 +708,29 @@ class DiskIo(InternalTelemetryDevice):
     def attach_to_node(self, node):
         self.node = node
         self.process = sysstats.setup_process_stats(node.pid)
+        self.process_start = sysstats.process_io_counters(self.process)
+        read_bytes = 0
+        write_bytes = 0
+        io.ensure_dir(self.log_root)
+        tmp_io_file = os.path.join(self.log_root, "{}.io".format(self.node_name))
+        if self.process_start:
+            read_bytes = self.process_start.read_bytes
+            write_bytes = self.process_start.write_bytes
+            self.logger.info("Using more accurate process-based I/O counters.")
+        else:
+            try:
+                self.disk_start = sysstats.disk_io_counters()
+                read_bytes = self.disk_start.read_bytes
+                write_bytes = self.disk_start.write_bytes
+                self.logger.warning("Process I/O counters are not supported on this platform. Falling back to less accurate disk "
+                                    "I/O counters.")
+            except RuntimeError:
+                self.logger.exception("Could not determine I/O stats at benchmark start.")
+        with open(tmp_io_file, "wt", encoding="utf-8") as f:
+            json.dump({"pid": self.node.pid, "read_bytes": read_bytes, "write_bytes": write_bytes}, f)
 
-    def on_benchmark_start(self):
-        if self.process is not None:
-            self.process_start = sysstats.process_io_counters(self.process)
-            read_bytes = 0
-            write_bytes = 0
-            io.ensure_dir(self.log_root)
-            tmp_io_file = os.path.join(self.log_root, "{}.io".format(self.node_name))
-            if self.process_start:
-                read_bytes = self.process_start.read_bytes
-                write_bytes = self.process_start.write_bytes
-                self.logger.info("Using more accurate process-based I/O counters.")
-            else:
-                try:
-                    self.disk_start = sysstats.disk_io_counters()
-                    read_bytes = self.disk_start.read_bytes
-                    write_bytes = self.disk_start.write_bytes
-                    self.logger.warning("Process I/O counters are not supported on this platform. Falling back to less accurate disk "
-                                        "I/O counters.")
-                except RuntimeError:
-                    self.logger.exception("Could not determine I/O stats at benchmark start.")
-            with open(tmp_io_file, "wt", encoding="utf-8") as f:
-                json.dump({"pid": self.node.pid, "read_bytes": read_bytes, "write_bytes": write_bytes}, f)
-
-    def on_benchmark_stop(self):
+    def detach_from_node(self, node, running):
+        if running:
             # Be aware the semantics of write counts etc. are different for disk and process statistics.
             # Thus we're conservative and only report I/O bytes now.
             # noinspection PyBroadException
@@ -904,7 +821,7 @@ class ClusterEnvironmentInfo(InternalTelemetryDevice):
         self.metrics_store = metrics_store
         self.client = client
 
-    def attach_to_cluster(self, cluster):
+    def on_benchmark_start(self):
         # noinspection PyBroadException
         try:
             client_info = self.client.info()
@@ -932,22 +849,17 @@ class ClusterEnvironmentInfo(InternalTelemetryDevice):
         store_node_attribute_metadata(self.metrics_store, nodes_info)
 
 
-class NodeEnvironmentInfo(InternalTelemetryDevice):
+def add_metadata_for_node(metrics_store, node_name, host_name):
     """
     Gathers static environment information like OS or CPU details for Rally-provisioned nodes.
     """
-    def __init__(self, metrics_store):
-        super().__init__()
-        self.metrics_store = metrics_store
-
-    def attach_to_node(self, node):
-        self.metrics_store.add_meta_info(metrics.MetaInfoScope.node, node.node_name, "os_name", sysstats.os_name())
-        self.metrics_store.add_meta_info(metrics.MetaInfoScope.node, node.node_name, "os_version", sysstats.os_version())
-        self.metrics_store.add_meta_info(metrics.MetaInfoScope.node, node.node_name, "cpu_logical_cores", sysstats.logical_cpu_cores())
-        self.metrics_store.add_meta_info(metrics.MetaInfoScope.node, node.node_name, "cpu_physical_cores", sysstats.physical_cpu_cores())
-        self.metrics_store.add_meta_info(metrics.MetaInfoScope.node, node.node_name, "cpu_model", sysstats.cpu_model())
-        self.metrics_store.add_meta_info(metrics.MetaInfoScope.node, node.node_name, "node_name", node.node_name)
-        self.metrics_store.add_meta_info(metrics.MetaInfoScope.node, node.node_name, "host_name", node.host_name)
+    metrics_store.add_meta_info(metrics.MetaInfoScope.node, node_name, "os_name", sysstats.os_name())
+    metrics_store.add_meta_info(metrics.MetaInfoScope.node, node_name, "os_version", sysstats.os_version())
+    metrics_store.add_meta_info(metrics.MetaInfoScope.node, node_name, "cpu_logical_cores", sysstats.logical_cpu_cores())
+    metrics_store.add_meta_info(metrics.MetaInfoScope.node, node_name, "cpu_physical_cores", sysstats.physical_cpu_cores())
+    metrics_store.add_meta_info(metrics.MetaInfoScope.node, node_name, "cpu_model", sysstats.cpu_model())
+    metrics_store.add_meta_info(metrics.MetaInfoScope.node, node_name, "node_name", node_name)
+    metrics_store.add_meta_info(metrics.MetaInfoScope.node, node_name, "host_name", host_name)
 
 
 class ExternalEnvironmentInfo(InternalTelemetryDevice):
@@ -960,7 +872,7 @@ class ExternalEnvironmentInfo(InternalTelemetryDevice):
         self.client = client
 
     # noinspection PyBroadException
-    def attach_to_cluster(self, cluster):
+    def on_benchmark_start(self):
         try:
             nodes_stats = self.client.nodes.stats(metric="_all")["nodes"].values()
         except BaseException:
@@ -993,95 +905,6 @@ class ExternalEnvironmentInfo(InternalTelemetryDevice):
         self.metrics_store.add_meta_info(metrics.MetaInfoScope.node, node_name, metric_key, extract_value(node, path))
 
 
-class ClusterMetaDataInfo(InternalTelemetryDevice):
-    """
-    Enriches the cluster with meta-data about it and its nodes.
-    """
-    def __init__(self, client):
-        super().__init__()
-        self.client = client
-
-    def attach_to_cluster(self, cluster):
-        self.cluster_metadata(cluster)
-        self.nodes_metadata(cluster)
-
-    def cluster_metadata(self, cluster):
-        # noinspection PyBroadException
-        try:
-            client_info = self.client.info()
-        except BaseException:
-            self.logger.exception("Could not retrieve cluster version info")
-            return
-        revision = client_info["version"]["build_hash"]
-        distribution_version = client_info["version"]["number"]
-        # older versions (pre 6.3.0) don't expose a build_flavor property because the only (implicit) flavor was "oss".
-        distribution_flavor = client_info["version"].get("build_flavor", "oss")
-
-        cluster.distribution_version = distribution_version
-        cluster.distribution_flavor = distribution_flavor
-        cluster.source_revision = revision
-
-    # noinspection PyBroadException
-    def nodes_metadata(self, cluster):
-        try:
-            nodes_stats = self.client.nodes.stats(metric="_all")["nodes"]
-        except BaseException:
-            self.logger.exception("Could not retrieve nodes stats")
-            nodes_stats = {}
-        try:
-            nodes_info = self.client.nodes.info(node_id="_all")["nodes"]
-        except BaseException:
-            self.logger.exception("Could not retrieve nodes info")
-            nodes_info = {}
-
-        for node_stats in nodes_stats.values():
-            node_name = node_stats["name"]
-            if cluster.has_node(node_name):
-                cluster_node = cluster.node(node_name)
-            else:
-                host = node_stats.get("host", "unknown")
-                cluster_node = cluster.add_node(host, node_name)
-            self.add_node_stats(cluster_node, node_stats)
-
-        for node_info in nodes_info.values():
-            self.add_node_info(cluster, node_info)
-
-    def add_node_info(self, cluster, node_info):
-        node_name = node_info["name"]
-        cluster_node = cluster.node(node_name)
-        if cluster_node:
-            cluster_node.ip = extract_value(node_info, ["ip"])
-            cluster_node.os = {
-                "name": extract_value(node_info, ["os", "name"]),
-                "version": extract_value(node_info, ["os", "version"])
-            }
-            cluster_node.jvm = {
-                "vendor": extract_value(node_info, ["jvm", "vm_vendor"]),
-                "version": extract_value(node_info, ["jvm", "version"])
-            }
-            cluster_node.cpu = {
-                "available_processors": extract_value(node_info, ["os", "available_processors"]),
-                "allocated_processors": extract_value(node_info, ["os", "allocated_processors"], fallback=None),
-            }
-            for plugin in extract_value(node_info, ["plugins"], fallback=[]):
-                if "name" in plugin:
-                    cluster_node.plugins.append(plugin["name"])
-
-    def add_node_stats(self, cluster_node, stats):
-        if cluster_node:
-            data_dirs = extract_value(stats, ["fs", "data"], fallback=[])
-            for data_dir in data_dirs:
-                fs_meta_data = {
-                    "mount": data_dir.get("mount", "unknown"),
-                    "type": data_dir.get("type", "unknown"),
-                    "spins": data_dir.get("spins", "unknown")
-                }
-                cluster_node.fs.append(fs_meta_data)
-            cluster_node.memory = {
-                "total_bytes": extract_value(stats, ["os", "mem", "total_in_bytes"], fallback=None)
-            }
-
-
 class JvmStatsSummary(InternalTelemetryDevice):
     """
     Gathers a summary of various JVM statistics during the whole race.
@@ -1093,6 +916,7 @@ class JvmStatsSummary(InternalTelemetryDevice):
         self.jvm_stats_per_node = {}
 
     def on_benchmark_start(self):
+        self.logger.info("JvmStatsSummary on benchmark start")
         self.jvm_stats_per_node = self.jvm_stats()
 
     def on_benchmark_stop(self):
@@ -1298,7 +1122,7 @@ class MlBucketProcessingTime(InternalTelemetryDevice):
         self.client = client
         self.metrics_store = metrics_store
 
-    def detach_from_cluster(self, cluster):
+    def on_benchmark_stop(self):
         import elasticsearch
         try:
             results = self.client.search(index=".ml-anomalies-*", body={

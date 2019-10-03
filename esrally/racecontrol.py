@@ -19,12 +19,12 @@ import collections
 import logging
 import os
 import sys
+
 import tabulate
 import thespian.actors
-import urllib
 
-from esrally import actor, config, exceptions, track, driver, mechanic, reporter, metrics, time, DOC_LINK, PROGRAM_NAME
-from esrally.utils import console, convert, opts
+from esrally import actor, config, doc_link, driver, exceptions, mechanic, metrics, reporter, track, PROGRAM_NAME
+from esrally.utils import console, opts
 
 # benchmarks with external candidates are really scary and we should warn users.
 BOGUS_RESULTS_WARNING = """
@@ -105,6 +105,7 @@ class BenchmarkActor(actor.RallyActor):
         self.start_sender = None
         self.mechanic = None
         self.main_driver = None
+        self.track_revision = None
 
     def receiveMsg_PoisonMessage(self, msg, sender):
         self.logger.info("BenchmarkActor got notified of poison message [%s] (forwarding).", (str(msg)))
@@ -122,14 +123,22 @@ class BenchmarkActor(actor.RallyActor):
     def receiveMsg_EngineStarted(self, msg, sender):
         self.logger.info("Mechanic has started engine successfully.")
         self.metrics_store.meta_info = msg.system_meta_info
-        cluster = msg.cluster_meta_info
-        self.race.cluster = cluster
+        self.race.team_revision = msg.team_revision
+        self.main_driver = self.createActor(driver.DriverActor, targetActorRequirements={"coordinator": True})
+        self.logger.info("Telling driver to prepare for benchmarking.")
+        self.send(self.main_driver, driver.PrepareBenchmark(self.cfg, self.race.track, self.metrics_store.meta_info))
+
+    @actor.no_retry("race control")
+    def receiveMsg_PreparationComplete(self, msg, sender):
+        self.race.distribution_flavor = msg.distribution_flavor
+        self.race.distribution_version = msg.distribution_version
+        self.race.revision = msg.revision
         if self.race.challenge.auto_generated:
             console.info("Racing on track [{}] and car {} with version [{}].\n"
-                         .format(self.race.track_name, self.race.car, self.race.cluster.distribution_version))
+                         .format(self.race.track_name, self.race.car, self.race.distribution_version))
         else:
             console.info("Racing on track [{}], challenge [{}] and car {} with version [{}].\n"
-                         .format(self.race.track_name, self.race.challenge_name, self.race.car, self.race.cluster.distribution_version))
+                         .format(self.race.track_name, self.race.challenge_name, self.race.car, self.race.distribution_version))
         self.run()
 
     @actor.no_retry("race control")
@@ -161,15 +170,6 @@ class BenchmarkActor(actor.RallyActor):
         self.metrics_store.bulk_add(msg.metrics)
         self.send(self.main_driver, thespian.actors.ActorExitRequest())
         self.main_driver = None
-        self.send(self.mechanic, mechanic.OnBenchmarkStop())
-
-    @actor.no_retry("race control")
-    def receiveMsg_BenchmarkStopped(self, msg, sender):
-        self.logger.info("Bulk adding system metrics to metrics store.")
-        self.metrics_store.bulk_add(msg.system_metrics)
-        self.logger.debug("Flushing metrics data...")
-        self.metrics_store.flush()
-        self.logger.debug("Flushing done")
         self.teardown()
 
     @actor.no_retry("race control")
@@ -200,8 +200,9 @@ class BenchmarkActor(actor.RallyActor):
                 raise exceptions.SystemSetupError("A distribution version is required. Please specify it with --distribution-version.")
             self.logger.info("Automatically derived distribution version [%s]", distribution_version)
             self.cfg.add(config.Scope.benchmark, "mechanic", "distribution.version", distribution_version)
-
+        
         t = track.load_track(self.cfg)
+        self.track_revision = self.cfg.opts("track", "repository.revision", mandatory=False)
         challenge_name = self.cfg.opts("track", "challenge.name")
         challenge = t.find_challenge_or_default(challenge_name)
         if challenge is None:
@@ -209,7 +210,7 @@ class BenchmarkActor(actor.RallyActor):
                                               % (t.name, challenge_name, PROGRAM_NAME))
         if challenge.user_info:
             console.info(challenge.user_info)
-        self.race = metrics.create_race(self.cfg, t, challenge)
+        self.race = metrics.create_race(self.cfg, t, challenge, self.track_revision)
 
         self.metrics_store = metrics.metrics_store(
             self.cfg,
@@ -225,11 +226,8 @@ class BenchmarkActor(actor.RallyActor):
                                                       msg.distribution, msg.external, msg.docker))
 
     def run(self):
-        self.logger.info("Telling mechanic of benchmark start.")
-        self.send(self.mechanic, mechanic.OnBenchmarkStart())
-        self.main_driver = self.createActor(driver.DriverActor, targetActorRequirements={"coordinator": True})
         self.logger.info("Telling driver to start benchmark.")
-        self.send(self.main_driver, driver.StartBenchmark(self.cfg, self.race.track, self.metrics_store.meta_info))
+        self.send(self.main_driver, driver.StartBenchmark())
 
     def teardown(self):
         self.logger.info("Asking mechanic to stop the engine.")
@@ -354,7 +352,7 @@ def run(cfg):
                 "Only the [benchmark-only] pipeline is supported by the Rally Docker image.\n"
                 "Add --pipeline=benchmark-only in your Rally arguments and try again.\n"
                 "For more details read the docs for the benchmark-only pipeline in {}\n".format(
-                    urllib.parse.urljoin(DOC_LINK, "pipelines.html#benchmark-only")))
+                    doc_link("pipelines.html#benchmark-only")))
 
     try:
         pipeline = pipelines[name]

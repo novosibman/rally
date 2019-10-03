@@ -15,16 +15,16 @@
 # specific language governing permissions and limitations
 # under the License.
 
-import os
 import glob
-import shutil
 import logging
+import os
+import shutil
 
 import jinja2
 
 from esrally import exceptions
-from esrally.mechanic import team, java_resolver, telemetry
-from esrally.utils import io, process, versions, jvm
+from esrally.mechanic import team, java_resolver
+from esrally.utils import console, io, process, versions
 
 
 def local_provisioner(cfg, car, plugins, cluster_settings, all_node_ips, target_root, node_id):
@@ -39,25 +39,10 @@ def local_provisioner(cfg, car, plugins, cluster_settings, all_node_ips, target_
 
     _, java_home = java_resolver.java_home(car, cfg)
     
-    node_telemetry_dir = os.path.join(node_root_dir, "telemetry")
-    java_major_version, java_home = java_resolver.java_home(car, cfg)
-    enabled_devices = cfg.opts("mechanic", "telemetry.devices")
-    telemetry_params = cfg.opts("mechanic", "telemetry.params")
-    node_telemetry = [
-        telemetry.FlightRecorder(telemetry_params, node_telemetry_dir, java_major_version),
-        telemetry.JitCompiler(node_telemetry_dir),
-        telemetry.Gc(node_telemetry_dir, java_major_version)
-    ]
-    t = telemetry.Telemetry(enabled_devices, devices=node_telemetry)
-
     es_installer = ElasticsearchInstaller(car, java_home, node_name, node_root_dir, all_node_ips, ip, http_port)
     plugin_installers = [PluginInstaller(plugin, java_home) for plugin in plugins]
 
-    return BareProvisioner(cluster_settings, es_installer, plugin_installers, preserve, t, distribution_version=distribution_version)
-
-
-def no_op_provisioner():
-    return NoOpProvisioner()
+    return BareProvisioner(cluster_settings, es_installer, plugin_installers, preserve, distribution_version=distribution_version)
 
 
 def docker_provisioner(cfg, car, cluster_settings, target_root, node_id):
@@ -113,7 +98,7 @@ def plain_text(file):
 def cleanup(preserve, install_dir, data_paths):
     logger = logging.getLogger(__name__)
     if preserve:
-        logger.info("Preserving benchmark candidate installation at [%s].", install_dir)
+        console.info("Preserving benchmark candidate installation at [{}].".format(install_dir), logger=logger)
     else:
         logger.info("Wiping benchmark candidate installation at [%s].", install_dir)
         for path in data_paths:
@@ -158,14 +143,13 @@ class BareProvisioner:
     of the benchmark candidate to the appropriate place.
     """
 
-    def __init__(self, cluster_settings, es_installer, plugin_installers, preserve, telemetry=None, distribution_version=None, apply_config=_apply_config):
+    def __init__(self, cluster_settings, es_installer, plugin_installers, preserve, distribution_version=None, apply_config=_apply_config):
         self.preserve = preserve
         self._cluster_settings = cluster_settings
         self.es_installer = es_installer
         self.plugin_installers = plugin_installers
         self.distribution_version = distribution_version
         self.apply_config = apply_config
-        self.telemetry = telemetry
         self.logger = logging.getLogger(__name__)
 
     def prepare(self, binary):
@@ -197,13 +181,7 @@ class BareProvisioner:
 
     def cleanup(self):
         self.es_installer.cleanup(self.preserve)
-        
-    def _prepare_java_opts(self):
-        # To detect out of memory errors during the benchmark
-        java_opts = ["-XX:+ExitOnOutOfMemoryError"]
-        if self.telemetry is not None:
-            java_opts.extend(self.telemetry.instrument_candidate_java_opts(self.es_installer.car, self.es_installer.node_name))
-        return java_opts
+
 
     def _provisioner_variables(self):
         plugin_variables = {}
@@ -236,10 +214,6 @@ class BareProvisioner:
         provisioner_vars.update(self.es_installer.variables)
         provisioner_vars.update(plugin_variables)
         provisioner_vars["cluster_settings"] = cluster_settings
-        
-        java_opts = self._prepare_java_opts()
-        if java_opts:
-            provisioner_vars["additional_java_settings"] = java_opts
         
         return provisioner_vars
 
@@ -382,17 +356,6 @@ class PluginInstaller:
         return self.variables.get("plugin_name", self.plugin_name)
 
 
-class NoOpProvisioner:
-    def __init__(self, *args):
-        pass
-
-    def prepare(self, *args):
-        return None
-
-    def cleanup(self):
-        pass
-
-
 class DockerProvisioner:
     def __init__(self, car, node_name, cluster_settings, ip, http_port, node_root_dir, distribution_version, rally_root, preserve):
         self.car = car
@@ -481,7 +444,7 @@ class DockerProvisioner:
         # do not attempt to cleanup data paths. It does not work due to different permissions. As:
         #
         # (a) Docker is unsupported and not meant to be used by everybody, and
-        # (b) the volume is recreated before each trial run
+        # (b) the volume is recreated before each race
         #
         # this is not a major problem.
         cleanup(self.preserve, self.install_dir, [])

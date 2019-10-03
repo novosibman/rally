@@ -23,7 +23,7 @@ import re
 import shutil
 from enum import Enum
 
-from esrally import PROGRAM_NAME, DOC_LINK, exceptions
+from esrally import PROGRAM_NAME, doc_link, exceptions
 from esrally.utils import io, git, console, convert
 
 
@@ -304,7 +304,7 @@ class ConfigFactory:
         if advanced_config:
             self.o("Running advanced configuration. You can get additional help at:")
             self.o("")
-            self.o("  %s" % console.format.link("%sconfiguration.html" % DOC_LINK))
+            self.o("  %s" % console.format.link(doc_link("configuration.html")))
             self.o("")
         else:
             self.o("Running simple configuration. Run the advanced configuration with:")
@@ -361,7 +361,7 @@ class ConfigFactory:
                 env_name = self._ask_env_name()
 
             preserve_install = convert.to_bool(self._ask_property("Do you want Rally to keep the Elasticsearch benchmark candidate "
-                                                                  "installation including the index (will use several GB per trial run)?",
+                                                                  "installation including the index (will use several GB per race)?",
                                                                   default_value=False))
         else:
             # Does not matter for an in-memory store
@@ -418,7 +418,7 @@ class ConfigFactory:
         self.o("More info about Rally:")
         self.o("")
         self.o("* Type %s --help" % PROGRAM_NAME)
-        self.o("* Read the documentation at %s" % console.format.link(DOC_LINK))
+        self.o("* Read the documentation at %s" % console.format.link(doc_link()))
         self.o("* Ask a question on the forum at %s" % console.format.link("https://discuss.elastic.co/c/elasticsearch/rally"))
 
     def print_detection_result(self, what, result, warn_if_missing=False, additional_message=None):
@@ -631,7 +631,7 @@ def migrate(config_file, current_version, target_version, out=print, i=input):
                         "  [{} = {}] to [{} = <the full command>]."
                         "  Please refer to the documentation for more details:"
                         "  {}.\n".format(plugin_match.group(1), config_file.location, k, v, new_key,
-                                         console.format.link("%selasticsearch_plugins.html#running-a-benchmark-with-plugins" % DOC_LINK)))
+                                         console.format.link(doc_link("elasticsearch_plugins.html#running-a-benchmark-with-plugins"))))
 
         if "build" in config:
             logger.info("Removing Gradle configuration as Rally now uses the Gradle Wrapper to build Elasticsearch.")

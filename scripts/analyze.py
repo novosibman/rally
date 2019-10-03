@@ -29,9 +29,9 @@
 #
 
 
+import argparse
 import json
 import sys
-import argparse
 
 try:
     import matplotlib.pyplot as plt
@@ -215,9 +215,9 @@ def parse_args():
 
     parser.add_argument(
         "--label",
-        help="defines which attribute to use for labelling data series (default: trial-timestamp).",
-        # choices=["environment", "trial-timestamp", "user-tags", "challenge", "car"],
-        default="trial-timestamp")
+        help="defines which attribute to use for labelling data series (default: race-timestamp).",
+        # choices=["environment", "race-timestamp", "user-tags", "challenge", "car"],
+        default="race-timestamp")
 
     parser.add_argument("path",
                         nargs="+",

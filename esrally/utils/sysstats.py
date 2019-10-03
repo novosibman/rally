@@ -16,6 +16,7 @@
 # under the License.
 
 import platform
+
 import psutil
 
 # py-cpuinfo raises an Exception on unsupported systems. This is as specific as we can get.
@@ -50,6 +51,13 @@ def cpu_model():
         if "brand" in cpu_info:
             return cpu_info["brand"]
     return "Unknown"
+
+
+def cpu_arch():
+    """
+    :return: The CPU architecture name.
+    """
+    return platform.uname().machine
 
 
 def disks():

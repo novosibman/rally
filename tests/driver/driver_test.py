@@ -15,12 +15,12 @@
 # specific language governing permissions and limitations
 # under the License.
 
-import unittest.mock as mock
-import threading
 import collections
+import threading
 import time
-from unittest import TestCase
+import unittest.mock as mock
 from datetime import datetime
+from unittest import TestCase
 
 from esrally import metrics, track, exceptions, config
 from esrally.driver import driver, runner
@@ -33,55 +33,67 @@ class DriverTestParamSource:
             params = {}
         self._indices = track.indices
         self._params = params
+        self._current = 1
+        self._total = params.get("size")
+        self.infinite = self._total is None
 
     def partition(self, partition_index, total_partitions):
         return self
 
-    def size(self):
-        return self._params["size"] if "size" in self._params else None
+    @property
+    def percent_completed(self):
+        if self.infinite:
+            return None
+        return self._current / self._total
 
     def params(self):
-        return self._params
-
-
-class DriverTestParamSourceWithProgress:
-    def __init__(self, track=None, params=None, **kwargs):
-        if params is None:
-            params = {}
-        self._indices = track.indices
-        self._params = params
-        self.percent_completed = 0.0
-
-    def partition(self, partition_index, total_partitions):
-        return self
-
-    def size(self):
-        return self._params["size"] if "size" in self._params else None
-
-    def params(self):
-        # just provide a simple progress indication. The important point is
-        # that we define it at all not so much what the actual values is.
-        self.percent_completed += 0.01
+        if not self.infinite and self._current > self._total:
+            raise StopIteration()
+        self._current += 1
         return self._params
 
 
 class DriverTests(TestCase):
+    class Holder:
+        def __init__(self, all_hosts=None, all_client_options=None):
+            self.all_hosts = all_hosts
+            self.all_client_options = all_client_options
+
     def __init__(self, methodName='runTest'):
         super().__init__(methodName)
         self.cfg = None
         self.track = None
 
+    class StaticClientFactory:
+        PATCHER = None
+
+        def __init__(self, *args, **kwargs):
+            DriverTests.StaticClientFactory.PATCHER = mock.patch("elasticsearch.Elasticsearch")
+            self.es = DriverTests.StaticClientFactory.PATCHER.start()
+            self.es.indices.stats.return_value = {"mocked": True}
+
+        def create(self):
+            return self.es
+
+        @classmethod
+        def close(cls):
+            DriverTests.StaticClientFactory.PATCHER.stop()
+
     def setUp(self):
         self.cfg = config.Config()
         self.cfg.add(config.Scope.application, "system", "env.name", "unittest")
         self.cfg.add(config.Scope.application, "system", "time.start", datetime(year=2017, month=8, day=20, hour=1, minute=0, second=0))
-        self.cfg.add(config.Scope.application, "system", "trial.id", "6ebc6e53-ee20-4b0c-99b4-09697987e9f4")
+        self.cfg.add(config.Scope.application, "system", "race.id", "6ebc6e53-ee20-4b0c-99b4-09697987e9f4")
         self.cfg.add(config.Scope.application, "track", "challenge.name", "default")
         self.cfg.add(config.Scope.application, "track", "params", {})
         self.cfg.add(config.Scope.application, "track", "test.mode.enabled", True)
+        self.cfg.add(config.Scope.application, "telemetry", "devices", [])
+        self.cfg.add(config.Scope.application, "telemetry", "params", {})
         self.cfg.add(config.Scope.application, "mechanic", "car.names", ["default"])
-        self.cfg.add(config.Scope.application, "client", "hosts", ["localhost:9200"])
-        self.cfg.add(config.Scope.application, "client", "options", {})
+        self.cfg.add(config.Scope.application, "mechanic", "skip.rest.api.check", True)
+        self.cfg.add(config.Scope.application, "client", "hosts",
+                     DriverTests.Holder(all_hosts={"default": ["localhost:9200"]}))
+        self.cfg.add(config.Scope.application, "client", "options", DriverTests.Holder(all_client_options={"default": {}}))
         self.cfg.add(config.Scope.application, "driver", "load_driver_hosts", ["localhost"])
         self.cfg.add(config.Scope.application, "reporting", "datastore.type", "in-memory")
 
@@ -90,6 +102,9 @@ class DriverTests(TestCase):
         ])
         another_challenge = track.Challenge("other", default=False)
         self.track = track.Track(name="unittest", description="unittest track", challenges=[another_challenge, default_challenge])
+
+    def tearDown(self):
+        DriverTests.StaticClientFactory.close()
 
     def create_test_driver_target(self):
         track_preparator = "track_preparator_marker"
@@ -107,9 +122,8 @@ class DriverTests(TestCase):
         resolve.side_effect = ["10.5.5.1", "10.5.5.2"]
 
         target = self.create_test_driver_target()
-        d = driver.Driver(target, self.cfg)
-
-        d.start_benchmark(t=self.track, metrics_meta_info={})
+        d = driver.Driver(target, self.cfg, es_client_factory_class=DriverTests.StaticClientFactory)
+        d.prepare_benchmark(t=self.track, metrics_meta_info={})
 
         target.create_track_preparator.assert_has_calls(calls=[
             mock.call("10.5.5.1"),
@@ -117,8 +131,7 @@ class DriverTests(TestCase):
         ])
 
         target.on_prepare_track.assert_called_once_with(["track_preparator_marker", "track_preparator_marker"], self.cfg, self.track)
-
-        d.after_track_prepared()
+        d.start_benchmark()
 
         target.create_client.assert_has_calls(calls=[
             mock.call(0, "10.5.5.1"),
@@ -132,14 +145,14 @@ class DriverTests(TestCase):
 
     def test_assign_drivers_round_robin(self):
         target = self.create_test_driver_target()
-        d = driver.Driver(target, self.cfg)
+        d = driver.Driver(target, self.cfg, es_client_factory_class=DriverTests.StaticClientFactory)
 
-        d.start_benchmark(t=self.track, metrics_meta_info={})
+        d.prepare_benchmark(t=self.track, metrics_meta_info={})
 
         target.create_track_preparator.assert_called_once_with("localhost")
         target.on_prepare_track.assert_called_once_with(["track_preparator_marker"], self.cfg, self.track)
 
-        d.after_track_prepared()
+        d.start_benchmark()
 
         target.create_client.assert_has_calls(calls=[
             mock.call(0, "localhost"),
@@ -153,10 +166,10 @@ class DriverTests(TestCase):
 
     def test_client_reaches_join_point_others_still_executing(self):
         target = self.create_test_driver_target()
-        d = driver.Driver(target, self.cfg)
+        d = driver.Driver(target, self.cfg, es_client_factory_class=DriverTests.StaticClientFactory)
 
-        d.start_benchmark(t=self.track, metrics_meta_info={})
-        d.after_track_prepared()
+        d.prepare_benchmark(t=self.track, metrics_meta_info={})
+        d.start_benchmark()
 
         self.assertEqual(0, len(d.clients_completed_current_step))
 
@@ -169,10 +182,10 @@ class DriverTests(TestCase):
 
     def test_client_reaches_join_point_which_completes_parent(self):
         target = self.create_test_driver_target()
-        d = driver.Driver(target, self.cfg)
+        d = driver.Driver(target, self.cfg, es_client_factory_class=DriverTests.StaticClientFactory)
 
-        d.start_benchmark(t=self.track, metrics_meta_info={})
-        d.after_track_prepared()
+        d.prepare_benchmark(t=self.track, metrics_meta_info={})
+        d.start_benchmark()
 
         self.assertEqual(0, len(d.clients_completed_current_step))
 
@@ -206,7 +219,10 @@ class DriverTests(TestCase):
 
 
 class ScheduleTestCase(TestCase):
-    def assert_schedule(self, expected_schedule, schedule, eternal_schedule=False):
+    def assert_schedule(self, expected_schedule, schedule, infinite_schedule=False):
+        if not infinite_schedule:
+            self.assertEqual(len(expected_schedule), len(schedule),
+                             msg="Number of elements in the schedules do not match")
         idx = 0
         for invocation_time, sample_type, progress_percent, runner, params in schedule:
             exp_invocation_time, exp_sample_type, exp_progress_percent, exp_params = expected_schedule[idx]
@@ -216,8 +232,8 @@ class ScheduleTestCase(TestCase):
             self.assertIsNotNone(runner, "runner must be defined")
             self.assertEqual(exp_params, params, "Parameters do not match")
             idx += 1
-            # for eternal schedules we only check the first few elements
-            if eternal_schedule and idx == len(expected_schedule):
+            # for infinite schedules we only check the first few elements
+            if infinite_schedule and idx == len(expected_schedule):
                 break
 
 
@@ -435,7 +451,6 @@ class MetricsAggregationTests(TestCase):
 class SchedulerTests(ScheduleTestCase):
     def setUp(self):
         params.register_param_source_for_name("driver-test-param-source", DriverTestParamSource)
-        params.register_param_source_for_name("driver-test-param-source-with-progress", DriverTestParamSourceWithProgress)
         runner.register_default_runners()
         self.test_track = track.Track(name="unittest")
 
@@ -454,7 +469,7 @@ class SchedulerTests(ScheduleTestCase):
             (0.6, metrics.SampleType.Normal, 7 / 8, {}),
             (0.7, metrics.SampleType.Normal, 8 / 8, {}),
         ]
-        self.assert_schedule(expected_schedule, schedule)
+        self.assert_schedule(expected_schedule, list(schedule))
 
     def test_search_task_two_clients(self):
         task = track.Task("search", track.Operation("search", track.OperationType.Search.name, param_source="driver-test-param-source"),
@@ -469,7 +484,7 @@ class SchedulerTests(ScheduleTestCase):
             (0.8, metrics.SampleType.Normal, 5 / 6, {}),
             (1.0, metrics.SampleType.Normal, 6 / 6, {}),
         ]
-        self.assert_schedule(expected_schedule, schedule)
+        self.assert_schedule(expected_schedule, list(schedule))
 
     def test_schedule_param_source_determines_iterations_no_warmup(self):
         # we neither define any time-period nor any iteration count on the task.
@@ -533,7 +548,7 @@ class SchedulerTests(ScheduleTestCase):
             (10.0, metrics.SampleType.Normal, 11 / 11, {"body": ["a"], "size": 11}),
         ], list(invocations))
 
-    def test_eternal_schedule_without_progress_indication(self):
+    def test_infinite_schedule_without_progress_indication(self):
         task = track.Task("time-based", track.Operation("time-based", track.OperationType.Bulk.name, params={"body": ["a"]},
                                                         param_source="driver-test-param-source"),
                           warmup_time_period=0, clients=4, params={"target-throughput": 4, "clients": 4})
@@ -546,22 +561,22 @@ class SchedulerTests(ScheduleTestCase):
             (2.0, metrics.SampleType.Normal, None, {"body": ["a"]}),
             (3.0, metrics.SampleType.Normal, None, {"body": ["a"]}),
             (4.0, metrics.SampleType.Normal, None, {"body": ["a"]}),
-        ], invocations, eternal_schedule=True)
+        ], invocations, infinite_schedule=True)
 
-    def test_eternal_schedule_with_progress_indication(self):
-        task = track.Task("time-based", track.Operation("time-based", track.OperationType.Bulk.name, params={"body": ["a"]},
-                                                        param_source="driver-test-param-source-with-progress"),
+    def test_finite_schedule_with_progress_indication(self):
+        task = track.Task("time-based", track.Operation("time-based", track.OperationType.Bulk.name, params={"body": ["a"], "size": 5},
+                                                        param_source="driver-test-param-source"),
                           warmup_time_period=0, clients=4, params={"target-throughput": 4, "clients": 4})
 
         invocations = driver.schedule_for(self.test_track, task, 0)
 
         self.assert_schedule([
-            (0.0, metrics.SampleType.Normal, 0.0, {"body": ["a"]}),
-            (1.0, metrics.SampleType.Normal, 0.01, {"body": ["a"]}),
-            (2.0, metrics.SampleType.Normal, 0.02, {"body": ["a"]}),
-            (3.0, metrics.SampleType.Normal, 0.03, {"body": ["a"]}),
-            (4.0, metrics.SampleType.Normal, 0.04, {"body": ["a"]}),
-        ], invocations, eternal_schedule=True)
+            (0.0, metrics.SampleType.Normal, 1 / 5, {"body": ["a"], "size": 5}),
+            (1.0, metrics.SampleType.Normal, 2 / 5, {"body": ["a"], "size": 5}),
+            (2.0, metrics.SampleType.Normal, 3 / 5, {"body": ["a"], "size": 5}),
+            (3.0, metrics.SampleType.Normal, 4 / 5, {"body": ["a"], "size": 5}),
+            (4.0, metrics.SampleType.Normal, 5 / 5, {"body": ["a"], "size": 5}),
+        ], list(invocations), infinite_schedule=False)
 
     def test_schedule_for_time_based(self):
         task = track.Task("time-based", track.Operation("time-based", track.OperationType.Bulk.name, params={"body": ["a"], "size": 11},
@@ -879,3 +894,49 @@ class ProfilerTests(TestCase):
         self.assertEqual(2, return_value)
         duration = end - start
         self.assertTrue(0.9 <= duration <= 1.2, "Should sleep for roughly 1 second but took [%.2f] seconds." % duration)
+
+
+class RestLayerTests(TestCase):
+    @mock.patch("elasticsearch.Elasticsearch", autospec=True)
+    def test_successfully_waits_for_rest_layer(self, es):
+        self.assertTrue(driver.wait_for_rest_layer(es, max_attempts=3))
+
+    # don't sleep in realtime
+    @mock.patch("time.sleep")
+    @mock.patch("elasticsearch.Elasticsearch", autospec=True)
+    def test_retries_on_transport_errors(self, es, sleep):
+        import elasticsearch
+
+        es.info.side_effect = [
+            elasticsearch.TransportError(503, "Service Unavailable"),
+            elasticsearch.TransportError(401, "Unauthorized"),
+            {
+                "version": {
+                    "number": "5.0.0",
+                    "build_hash": "abc123"
+                }
+            }
+        ]
+        self.assertTrue(driver.wait_for_rest_layer(es, max_attempts=3))
+
+    # don't sleep in realtime
+    @mock.patch("time.sleep")
+    @mock.patch("elasticsearch.Elasticsearch", autospec=True)
+    def test_dont_retries_eternally_on_transport_errors(self, es, sleep):
+        import elasticsearch
+
+        es.info.side_effect = elasticsearch.TransportError(401, "Unauthorized")
+        self.assertFalse(driver.wait_for_rest_layer(es, max_attempts=3))
+
+    @mock.patch("elasticsearch.Elasticsearch", autospec=True)
+    def test_ssl_error(self, es):
+        import elasticsearch
+        import urllib3.exceptions
+
+        es.info.side_effect = elasticsearch.ConnectionError("N/A",
+                                                            "[SSL: UNKNOWN_PROTOCOL] unknown protocol (_ssl.c:719)",
+                                                            urllib3.exceptions.SSLError(
+                                                                "[SSL: UNKNOWN_PROTOCOL] unknown protocol (_ssl.c:719)"))
+        with self.assertRaisesRegex(expected_exception=exceptions.SystemSetupError,
+                                    expected_regex="Could not connect to cluster via https. Is this an https endpoint?"):
+            driver.wait_for_rest_layer(es, max_attempts=3)

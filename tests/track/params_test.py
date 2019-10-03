@@ -19,8 +19,30 @@ import random
 from unittest import TestCase
 
 from esrally import exceptions
-from esrally.utils import io
 from esrally.track import params, track
+from esrally.utils import io
+
+
+class StaticBulkReader:
+    def __init__(self, index_name, type_name, bulks):
+        self.index_name = index_name
+        self.type_name = type_name
+        self.bulks = iter(bulks)
+
+    def __enter__(self):
+        return self
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        batch = []
+        bulk = next(self.bulks)
+        batch.append((len(bulk), bulk))
+        return self.index_name, self.type_name, batch
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
 
 
 class SliceTests(TestCase):
@@ -862,9 +884,30 @@ class BulkIndexParamSourceTests(TestCase):
 
         partition = source.partition(0, 1)
         # # no ingest-percentage specified, should issue all one hundred bulk requests
-        self.assertEqual(100, partition.size())
+        self.assertEqual(100, partition.total_bulks)
 
     def test_restricts_number_of_bulks_if_required(self):
+        def create_unit_test_reader(*args):
+            return StaticBulkReader("idx", "doc", bulks=[
+                ['{"location" : [-0.1485188, 51.5250666]}'],
+                ['{"location" : [-0.1479949, 51.5252071]}'],
+                ['{"location" : [-0.1458559, 51.5289059]}'],
+                ['{"location" : [-0.1498551, 51.5282564]}'],
+                ['{"location" : [-0.1487043, 51.5254843]}'],
+                ['{"location" : [-0.1533367, 51.5261779]}'],
+                ['{"location" : [-0.1543018, 51.5262398]}'],
+                ['{"location" : [-0.1522118, 51.5266564]}'],
+                ['{"location" : [-0.1529092, 51.5263360]}'],
+                ['{"location" : [-0.1537008, 51.5265365]}'],
+            ])
+
+        def schedule(param_source):
+            while True:
+                try:
+                    yield param_source.params()
+                except StopIteration:
+                    return
+
         corpora = [
             track.DocumentCorpus(name="default", documents=[
                 track.Documents(source_format=track.Documents.SOURCE_FORMAT_BULK,
@@ -886,12 +929,14 @@ class BulkIndexParamSourceTests(TestCase):
             track=track.Track(name="unit-test", corpora=corpora),
             params={
                 "bulk-size": 10000,
-                "ingest-percentage": 2.5
+                "ingest-percentage": 2.5,
+                "__create_reader": create_unit_test_reader
             })
 
         partition = source.partition(0, 1)
         # should issue three bulks of size 10.000
-        self.assertEqual(3, partition.size())
+        self.assertEqual(3, partition.total_bulks)
+        self.assertEqual(3, len(list(schedule(partition))))
 
     def test_create_with_conflict_probability_zero(self):
         params.BulkIndexParamSource(track=track.Track(name="unit-test"), params={
@@ -932,31 +977,11 @@ class BulkIndexParamSourceTests(TestCase):
 
 
 class BulkDataGeneratorTests(TestCase):
-    class TestBulkReader:
-        def __init__(self, index_name, type_name, bulks):
-            self.index_name = index_name
-            self.type_name = type_name
-            self.bulks = iter(bulks)
-
-        def __enter__(self):
-            return self
-
-        def __iter__(self):
-            return self
-
-        def __next__(self):
-            batch = []
-            bulk = next(self.bulks)
-            batch.append((len(bulk), bulk))
-            return self.index_name, self.type_name, batch
-
-        def __exit__(self, exc_type, exc_val, exc_tb):
-            return False
 
     @classmethod
     def create_test_reader(cls, batches):
         def inner_create_test_reader(docs, *args):
-            return BulkDataGeneratorTests.TestBulkReader(docs.target_index, docs.target_type, batches)
+            return StaticBulkReader(docs.target_index, docs.target_type, batches)
 
         return inner_create_test_reader
 
@@ -1572,7 +1597,7 @@ class SearchParamSourceTests(TestCase):
         self.assertEqual("index1", p["index"])
         self.assertIsNone(p["type"])
         self.assertEqual({}, p["request-params"])
-        self.assertEquals(True, p["cache"])
+        self.assertEqual(True, p["cache"])
         self.assertEqual({
             "query": {
                 "match_all": {}
@@ -1627,7 +1652,7 @@ class SearchParamSourceTests(TestCase):
         self.assertEqual("type1", p["type"])
         self.assertDictEqual({}, p["request-params"])
         # Explicitly check for equality to `False` - assertFalse would also succeed if it is `None`.
-        self.assertEquals(False, p["cache"])
+        self.assertEqual(False, p["cache"])
         self.assertEqual({
             "query": {
                 "match_all": {}

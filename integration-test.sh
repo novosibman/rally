@@ -228,6 +228,8 @@ function test_list {
     esrally list elasticsearch-plugins --configuration-name="${cfg}"
     info "test list tracks [${cfg}]"
     esrally list tracks --configuration-name="${cfg}"
+    info "test list can use track revision together with track repository"
+    esrally list tracks --configuration-name="${cfg}" --track-repository=default --track-revision=4080dc9850d07e23b6fc7cfcdc7cf57b14e5168d
     info "test list telemetry [${cfg}]"
     esrally list telemetry --configuration-name="${cfg}"
 }
@@ -543,12 +545,14 @@ function main {
 
 check_prerequisites
 
-# allow invocation from release-docker.sh
-if [[ $1 == "test-docker-release" ]]; then
-    test_docker_release_image
+trap "tear_down" EXIT
+
+# if argument is the name of a function, set up and call it
+if declare -f "$1" > /dev/null
+then
+    set_up
+    $1
     exit
 fi
-
-trap "tear_down" EXIT
 
 main

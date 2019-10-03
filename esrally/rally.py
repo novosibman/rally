@@ -23,9 +23,10 @@ import sys
 import time
 import uuid
 
-from esrally import version, actor, config, paths, racecontrol, reporter, metrics, track, chart_generator, exceptions, log
-from esrally import PROGRAM_NAME, DOC_LINK, BANNER, SKULL, check_python_version
-from esrally.mechanic import team, telemetry, mechanic
+from esrally import PROGRAM_NAME, BANNER, SKULL, check_python_version, doc_link, telemetry
+from esrally import version, actor, config, paths, racecontrol, reporter, metrics, track, chart_generator, exceptions, \
+    log
+from esrally.mechanic import team, mechanic
 from esrally.utils import io, convert, process, console, net, opts
 
 
@@ -46,7 +47,7 @@ def create_arg_parser():
 
     parser = argparse.ArgumentParser(prog=PROGRAM_NAME,
                                      description=BANNER + "\n\n You Know, for Benchmarking Elasticsearch.",
-                                     epilog="Find out more about Rally at %s" % console.format.link(DOC_LINK),
+                                     epilog="Find out more about Rally at {}".format(console.format.link(doc_link())),
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--version', action='version', version="%(prog)s " + version.version())
 
@@ -191,7 +192,7 @@ def create_arg_parser():
         track_source_group.add_argument(
             "--track-path",
             help="Define the path to a track.")
-        track_source_group.add_argument(
+        p.add_argument(
             "--track-revision",
             help="Define a specific revision in the track repository that Rally should use.",
             default=None)
@@ -210,6 +211,10 @@ def create_arg_parser():
             action="store_true")
 
     for p in [parser, race_parser]:
+        p.add_argument(
+            "--race-id",
+            help="Define a unique id for this race.",
+            default=str(uuid.uuid4()))
         p.add_argument(
             "--pipeline",
             help="Select the pipeline to run.",
@@ -416,7 +421,7 @@ def print_help_on_errors():
     console.println(console.format.bold(heading))
     console.println(console.format.underline_for(heading))
     console.println("* Check the log files in {} for errors.".format(log.default_log_path()))
-    console.println("* Read the documentation at {}".format(console.format.link(DOC_LINK)))
+    console.println("* Read the documentation at {}".format(console.format.link(doc_link())))
     console.println("* Ask a question on the forum at {}".format(console.format.link("https://discuss.elastic.co/c/elasticsearch/rally")))
     console.println("* Raise an issue at {} and include the log files in {}."
                     .format(console.format.link("https://github.com/elastic/rally/issues"), log.default_log_path()))
@@ -570,7 +575,7 @@ def main():
         cfg.add(config.Scope.application, "system", "time.start", datetime.datetime.utcnow())
         cfg.add(config.Scope.application, "system", "time.start.user_provided", False)
 
-    cfg.add(config.Scope.applicationOverride, "system", "trial.id", str(uuid.uuid4()))
+    cfg.add(config.Scope.applicationOverride, "system", "race.id", args.race_id)
     cfg.add(config.Scope.applicationOverride, "system", "quiet.mode", args.quiet)
     cfg.add(config.Scope.applicationOverride, "system", "offline.mode", args.offline)
 
@@ -602,18 +607,22 @@ def main():
         cfg.add(config.Scope.applicationOverride, "mechanic", "preserve.install", convert.to_bool(args.preserve_install))
     cfg.add(config.Scope.applicationOverride, "mechanic", "skip.rest.api.check", convert.to_bool(args.skip_rest_api_check))
     cfg.add(config.Scope.applicationOverride, "mechanic", "runtime.jdk", args.runtime_jdk)
-    cfg.add(config.Scope.applicationOverride, "mechanic", "telemetry.devices", opts.csv_to_list(args.telemetry))
-    cfg.add(config.Scope.applicationOverride, "mechanic", "telemetry.params", opts.to_dict(args.telemetry_params))
+    cfg.add(config.Scope.applicationOverride, "telemetry", "devices", opts.csv_to_list(args.telemetry))
+    cfg.add(config.Scope.applicationOverride, "telemetry", "params", opts.to_dict(args.telemetry_params))
 
     cfg.add(config.Scope.applicationOverride, "race", "pipeline", args.pipeline)
     cfg.add(config.Scope.applicationOverride, "race", "user.tag", args.user_tag)
+    
+    cfg.add(config.Scope.applicationOverride, "track", "repository.revision", args.track_revision)
 
     # We can assume here that if a track-path is given, the user did not specify a repository either (although argparse sets it to
     # its default value)
     if args.track_path:
         cfg.add(config.Scope.applicationOverride, "track", "track.path", os.path.abspath(io.normalize_path(args.track_path)))
         cfg.add(config.Scope.applicationOverride, "track", "repository.name", None)
-        cfg.add(config.Scope.applicationOverride, "track", "repository.revision", None)
+        if args.track_revision:
+            # stay as close as possible to argparse errors although we have a custom validation.
+            arg_parser.error("argument --track-revision not allowed with argument --track-path")
         if args.track:
             # stay as close as possible to argparse errors although we have a custom validation.
             arg_parser.error("argument --track not allowed with argument --track-path")
@@ -621,7 +630,6 @@ def main():
     else:
         # cfg.add(config.Scope.applicationOverride, "track", "track.path", None)
         cfg.add(config.Scope.applicationOverride, "track", "repository.name", args.track_repository)
-        cfg.add(config.Scope.applicationOverride, "track", "repository.revision", args.track_revision)
         # set the default programmatically because we need to determine whether the user has provided a value
         chosen_track = args.track if args.track else "geonames"
         cfg.add(config.Scope.applicationOverride, "track", "track.name", chosen_track)

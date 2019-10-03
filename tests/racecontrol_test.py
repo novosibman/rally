@@ -15,13 +15,11 @@
 # specific language governing permissions and limitations
 # under the License.
 
-import unittest.mock as mock
 import os
-import random
+import unittest.mock as mock
 from unittest import TestCase
 
-from esrally import racecontrol, config, exceptions, DOC_LINK
-from esrally.utils import console
+from esrally import config, exceptions, racecontrol
 
 
 class RaceControlTests(TestCase):

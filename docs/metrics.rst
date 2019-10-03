@@ -11,8 +11,8 @@ Here is a typical metrics record::
 
     {
           "environment": "nightly",
-          "trial-timestamp": "20160421T042749Z",
-          "trial-id": "6ebc6e53-ee20-4b0c-99b4-09697987e9f4",
+          "race-timestamp": "20160421T042749Z",
+          "race-id": "6ebc6e53-ee20-4b0c-99b4-09697987e9f4",
           "@timestamp": 1461213093093,
           "relative-time": 10507328,
           "track": "geonames",
@@ -61,17 +61,17 @@ If you specify a car with mixins, it will be stored as one string separated with
 sample-type
 ~~~~~~~~~~~
 
-Rally runs warmup trials but records all samples. Normally, we are just interested in "normal" samples but for a full picture we might want to look also at "warmup" samples.
+Rally can be configured to run for a certain period in warmup mode. In this mode samples will be collected with the ``sample-type`` "warmup" but only "normal" samples are considered for the results that reported.
 
-trial-timestamp
-~~~~~~~~~~~~~~~
+race-timestamp
+~~~~~~~~~~~~~~
 
 A constant timestamp (always in UTC) that is determined when Rally is invoked.
 
-trial-id
-~~~~~~~~
+race-id
+~~~~~~~
 
-A UUID that changes on every invocation of Rally. It is intended to group all samples of a benchmark trial.
+A UUID that changes on every invocation of Rally. It is intended to group all samples of a benchmarking run.
 
 @timestamp
 ~~~~~~~~~~
@@ -81,7 +81,7 @@ The timestamp in milliseconds since epoch determined when the sample was taken.
 relative-time
 ~~~~~~~~~~~~~
 
-The relative time in microseconds since the start of the benchmark. This is useful for comparing time-series graphs over multiple trials, e.g. you might want to compare the indexing throughput over time across multiple benchmark trials. Obviously, they should always start at the same (relative) point in time and absolute timestamps are useless for that.
+The relative time in microseconds since the start of the benchmark. This is useful for comparing time-series graphs over multiple races, e.g. you might want to compare the indexing throughput over time across multiple races. Obviously, they should always start at the same (relative) point in time and absolute timestamps are useless for that.
 
 name, value, unit
 ~~~~~~~~~~~~~~~~~
@@ -121,8 +121,6 @@ Rally stores the following metrics:
 * ``latency``: Time period between submission of a request and receiving the complete response. It also includes wait time, i.e. the time the request spends waiting until it is ready to be serviced by Elasticsearch.
 * ``service_time`` Time period between start of request processing and receiving the complete response. This metric can easily be mixed up with ``latency`` but does not include waiting time. This is what most load testing tools refer to as "latency" (although it is incorrect).
 * ``throughput``: Number of operations that Elasticsearch can perform within a certain time period, usually per second. See the :doc:`track reference </track>` for a definition of what is meant by one "operation" for each operation type.
-* ``merge_parts_total_time_*``: Different merge times as reported by Lucene. Only available if Lucene index writer trace logging is enabled.
-* ``merge_parts_total_docs_*``: See ``merge_parts_total_time_*``
 * ``disk_io_write_bytes``: number of bytes that have been written to disk during the benchmark. On Linux this metric reports only the bytes that have been written by Elasticsearch, on Mac OS X it reports the number of bytes written by all processes.
 * ``disk_io_read_bytes``: number of bytes that have been read from disk during the benchmark. The same caveats apply on Mac OS X as for ``disk_io_write_bytes``.
 * ``node_startup_time``: The time in seconds it took from process start until the node is up.

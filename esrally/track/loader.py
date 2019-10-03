@@ -15,23 +15,23 @@
 # specific language governing permissions and limitations
 # under the License.
 
+import glob
 import json
 import logging
 import os
 import re
-import glob
-import urllib.error
 import tempfile
+import urllib.error
 
 import jinja2
 import jinja2.exceptions
 import jsonschema
 import tabulate
+from jinja2 import meta
 
-from esrally import exceptions, time, PROGRAM_NAME
+from esrally import exceptions, time, PROGRAM_NAME, config
 from esrally.track import params, track
 from esrally.utils import io, convert, net, console, modules, opts, repo
-from jinja2 import meta
 
 
 class TrackSyntaxError(exceptions.InvalidSyntax):
@@ -157,6 +157,13 @@ def is_simple_track_mode(cfg):
     return cfg.exists("track", "track.path")
 
 
+def track_path(cfg):
+    repo = track_repo(cfg)
+    track_name = repo.track_name
+    track_dir = repo.track_dir(track_name)
+    return track_dir
+
+
 def track_repo(cfg, fetch=True, update=True):
     if is_simple_track_mode(cfg):
         track_path = cfg.opts("track", "track.path")
@@ -204,6 +211,7 @@ class GitTrackRepository:
                 self.repo.checkout(repo_revision)
             else:
                 self.repo.update(distribution_version)
+                cfg.add(config.Scope.applicationOverride, "track", "repository.revision", self.repo.revision)
 
     @property
     def track_names(self):

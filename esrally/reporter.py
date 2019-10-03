@@ -18,14 +18,14 @@
 import collections
 import csv
 import io
-import sys
 import logging
 import statistics
+import sys
 
 import tabulate
+
 from esrally import metrics, exceptions
 from esrally.utils import convert, io as rio, console
-
 
 FINAL_SCORE = r"""
 ------------------------------------------------------
@@ -39,7 +39,7 @@ FINAL_SCORE = r"""
 
 
 def calculate_results(metrics_store, race):
-    calc = StatsCalculator(metrics_store, race.challenge)
+    calc = StatsCalculator(metrics_store, race.track, race.challenge)
     return calc()
 
 
@@ -56,8 +56,8 @@ def compare(cfg):
         raise exceptions.SystemSetupError("compare needs baseline and a contender")
     race_store = metrics.race_store(cfg)
     ComparisonReporter(cfg).report(
-        race_store.find_by_trial_id(baseline_id),
-        race_store.find_by_trial_id(contender_id))
+        race_store.find_by_race_id(baseline_id),
+        race_store.find_by_race_id(contender_id))
 
 
 def print_internal(message):
@@ -126,8 +126,9 @@ def percentiles_for_sample_size(sample_size):
 
 
 class StatsCalculator:
-    def __init__(self, store, challenge):
+    def __init__(self, store, track, challenge):
         self.store = store
+        self.track = track
         self.challenge = challenge
         self.logger = logging.getLogger(__name__)
 
@@ -145,7 +146,12 @@ class StatsCalculator:
                         self.summary_stats("throughput", t),
                         self.single_latency(t),
                         self.single_latency(t, metric_name="service_time"),
-                        self.error_rate(t)
+                        self.error_rate(t),
+                        self.merge(
+                                self.track.meta_data,
+                                self.challenge.meta_data,
+                                task.operation.meta_data,
+                                task.meta_data)
                     )
         self.logger.debug("Gathering node startup time metrics.")
         startup_times = self.store.get_raw("node_startup_time")
@@ -172,14 +178,6 @@ class StatsCalculator:
         result.merge_throttle_time = self.sum("merges_total_throttled_time")
         result.merge_throttle_time_per_shard = self.shard_stats("merges_total_throttled_time")
 
-        self.logger.debug("Gathering merge part metrics.")
-        result.merge_part_time_postings = self.sum("merge_parts_total_time_postings")
-        result.merge_part_time_stored_fields = self.sum("merge_parts_total_time_stored_fields")
-        result.merge_part_time_doc_values = self.sum("merge_parts_total_time_doc_values")
-        result.merge_part_time_norms = self.sum("merge_parts_total_time_norms")
-        result.merge_part_time_vectors = self.sum("merge_parts_total_time_vectors")
-        result.merge_part_time_points = self.sum("merge_parts_total_time_points")
-
         self.logger.debug("Gathering ML max processing times.")
         result.ml_processing_time = self.ml_processing_time_stats()
 
@@ -195,6 +193,7 @@ class StatsCalculator:
         result.memory_points = self.median("segments_points_memory_in_bytes")
         result.memory_stored_fields = self.median("segments_stored_fields_memory_in_bytes")
 
+        # TODO: This cannot be done in the reporter anymore!
         self.logger.debug("Gathering disk metrics.")
         # This metric will only be written for the last iteration (as it can only be determined after the cluster has been shut down)
         result.index_size = self.sum("final_index_size_bytes")
@@ -206,6 +205,14 @@ class StatsCalculator:
         # convert to int, fraction counts are senseless
         median_segment_count = self.median("segments_count")
         result.segment_count = int(median_segment_count) if median_segment_count is not None else median_segment_count
+        return result
+
+    def merge(self, *args):
+        # This is similar to dict(collections.ChainMap(args)) except that we skip `None` in our implementation.
+        result = {}
+        for arg in args:
+            if arg is not None:
+                result.update(arg)
         return result
 
     def sum(self, metric_name):
@@ -316,13 +323,6 @@ class Stats:
         self.merge_throttle_time_per_shard = self.v(d, "merge_throttle_time_per_shard", default={})
         self.ml_processing_time = self.v(d, "ml_processing_time", default=[])
 
-        self.merge_part_time_postings = self.v(d, "merge_part_time_postings")
-        self.merge_part_time_stored_fields = self.v(d, "merge_part_time_stored_fields")
-        self.merge_part_time_doc_values = self.v(d, "merge_part_time_doc_values")
-        self.merge_part_time_norms = self.v(d, "merge_part_time_norms")
-        self.merge_part_time_vectors = self.v(d, "merge_part_time_vectors")
-        self.merge_part_time_points = self.v(d, "merge_part_time_points")
-
         self.young_gc_time = self.v(d, "young_gc_time")
         self.old_gc_time = self.v(d, "old_gc_time")
 
@@ -344,23 +344,32 @@ class Stats:
         return self.__dict__
 
     def as_flat_list(self):
+        def op_metrics(op_item, key, single_value=False):
+            doc = {
+                "task": op_item["task"],
+                "operation": op_item["operation"],
+                "name": key
+            }
+            if single_value:
+                doc["value"] = {"single":  op_item[key]}
+            else:
+                doc["value"] = op_item[key]
+            if "meta" in op_item:
+                doc["meta"] = op_item["meta"]
+            return doc
+
         all_results = []
         for metric, value in self.as_dict().items():
             if metric == "op_metrics":
                 for item in value:
                     if "throughput" in item:
-                        all_results.append(
-                            {"task": item["task"], "operation": item["operation"], "name": "throughput", "value": item["throughput"]})
+                        all_results.append(op_metrics(item, "throughput"))
                     if "latency" in item:
-                        all_results.append(
-                            {"task": item["task"], "operation": item["operation"], "name": "latency", "value": item["latency"]})
+                        all_results.append(op_metrics(item, "latency"))
                     if "service_time" in item:
-                        all_results.append(
-                            {"task": item["task"], "operation": item["operation"], "name": "service_time", "value": item["service_time"]})
+                        all_results.append(op_metrics(item, "service_time"))
                     if "error_rate" in item:
-                        all_results.append(
-                            {"task": item["task"], "operation": item["operation"], "name": "error_rate",
-                             "value": {"single": item["error_rate"]}})
+                        all_results.append(op_metrics(item, "error_rate", single_value=True))
             elif metric == "ml_processing_time":
                 for item in value:
                     all_results.append({
@@ -394,15 +403,18 @@ class Stats:
     def v(self, d, k, default=None):
         return d.get(k, default) if d else default
 
-    def add_op_metrics(self, task, operation, throughput, latency, service_time, error_rate):
-        self.op_metrics.append({
+    def add_op_metrics(self, task, operation, throughput, latency, service_time, error_rate, meta):
+        doc = {
             "task": task,
             "operation": operation,
             "throughput": throughput,
             "latency": latency,
             "service_time": service_time,
-            "error_rate": error_rate
-        })
+            "error_rate": error_rate,
+        }
+        if meta:
+            doc["meta"] = meta
+        self.op_metrics.append(doc)
 
     def add_node_metrics(self, node, startup_time):
         self.node_metrics.append({
@@ -442,7 +454,6 @@ class SummaryReporter:
         warnings = []
         metrics_table = []
         metrics_table.extend(self.report_totals(stats))
-        metrics_table.extend(self.report_merge_part_times(stats))
         metrics_table.extend(self.report_ml_processing_times(stats))
 
         metrics_table.extend(self.report_gc_times(stats))
@@ -548,18 +559,6 @@ class SummaryReporter:
             self.line("Cumulative {} of primary shards".format(name), "", total_count, ""),
         )
 
-    def report_merge_part_times(self, stats):
-        # note that these times are not(!) wall clock time results but total times summed up over multiple threads
-        unit = "min"
-        return self.join(
-            self.line("Merge time (postings)", "", stats.merge_part_time_postings, unit, convert.ms_to_minutes),
-            self.line("Merge time (stored fields)", "", stats.merge_part_time_stored_fields, unit, convert.ms_to_minutes),
-            self.line("Merge time (doc values)", "", stats.merge_part_time_doc_values, unit, convert.ms_to_minutes),
-            self.line("Merge time (norms)", "", stats.merge_part_time_norms, unit, convert.ms_to_minutes),
-            self.line("Merge time (vectors)", "", stats.merge_part_time_vectors, unit, convert.ms_to_minutes),
-            self.line("Merge time (points)", "", stats.merge_part_time_points, unit, convert.ms_to_minutes)
-        )
-
     def report_ml_processing_times(self, stats):
         lines = []
         for processing_time in stats.ml_processing_time:
@@ -633,8 +632,8 @@ class ComparisonReporter:
 
         print_internal("")
         print_internal("Comparing baseline")
-        print_internal("  Race ID: %s" % r1.trial_id)
-        print_internal("  Race timestamp: %s" % r1.trial_timestamp)
+        print_internal("  Race ID: %s" % r1.race_id)
+        print_internal("  Race timestamp: %s" % r1.race_timestamp)
         if r1.challenge_name:
             print_internal("  Challenge: %s" % r1.challenge_name)
         print_internal("  Car: %s" % r1.car_name)
@@ -643,8 +642,8 @@ class ComparisonReporter:
             print_internal("  User tags: %s" % r1_user_tags)
         print_internal("")
         print_internal("with contender")
-        print_internal("  Race ID: %s" % r2.trial_id)
-        print_internal("  Race timestamp: %s" % r2.trial_timestamp)
+        print_internal("  Race ID: %s" % r2.race_id)
+        print_internal("  Race timestamp: %s" % r2.race_timestamp)
         if r2.challenge_name:
             print_internal("  Challenge: %s" % r2.challenge_name)
         print_internal("  Car: %s" % r2.car_name)
@@ -662,8 +661,6 @@ class ComparisonReporter:
         self.plain = plain
         metrics_table = []
         metrics_table.extend(self.report_total_times(baseline_stats, contender_stats))
-        metrics_table.extend(self.report_merge_part_times(baseline_stats, contender_stats))
-        metrics_table.extend(self.report_merge_part_times(baseline_stats, contender_stats))
         metrics_table.extend(self.report_ml_processing_times(baseline_stats, contender_stats))
         metrics_table.extend(self.report_gc_times(baseline_stats, contender_stats))
         metrics_table.extend(self.report_disk_usage(baseline_stats, contender_stats))
@@ -724,25 +721,6 @@ class ComparisonReporter:
         return self.join(
             self.line("error rate", baseline_error_rate, contender_error_rate, task, "%",
                       treat_increase_as_improvement=False, formatter=convert.factor(100.0))
-        )
-
-    def report_merge_part_times(self, baseline_stats, contender_stats):
-        return self.join(
-            self.line("Merge time (postings)", baseline_stats.merge_part_time_postings,
-                      contender_stats.merge_part_time_postings,
-                      "", "min", treat_increase_as_improvement=False, formatter=convert.ms_to_minutes),
-            self.line("Merge time (stored fields)", baseline_stats.merge_part_time_stored_fields,
-                      contender_stats.merge_part_time_stored_fields,
-                      "", "min", treat_increase_as_improvement=False, formatter=convert.ms_to_minutes),
-            self.line("Merge time (doc values)", baseline_stats.merge_part_time_doc_values,
-                      contender_stats.merge_part_time_doc_values,
-                      "", "min", treat_increase_as_improvement=False, formatter=convert.ms_to_minutes),
-            self.line("Merge time (norms)", baseline_stats.merge_part_time_norms,
-                      contender_stats.merge_part_time_norms,
-                      "", "min", treat_increase_as_improvement=False, formatter=convert.ms_to_minutes),
-            self.line("Merge time (vectors)", baseline_stats.merge_part_time_vectors,
-                      contender_stats.merge_part_time_vectors,
-                      "", "min", treat_increase_as_improvement=False, formatter=convert.ms_to_minutes)
         )
 
     def report_ml_processing_times(self, baseline_stats, contender_stats):
